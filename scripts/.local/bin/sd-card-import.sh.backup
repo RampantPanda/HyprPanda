@@ -1,0 +1,273 @@
+#!/bin/bash
+# SD Card Photo Import Script
+# Detects SD card, asks user preferences, and organizes photos by EXIF date
+
+set -uo pipefail
+
+# Colors for output
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Default import directory
+DEFAULT_IMPORT_DIR="$HOME/Pictures/Input"
+
+# Function to find SD card mount point
+find_sd_card() {
+    # Try to find mounted SD card
+    # Common mount points: /media, /run/media, /mnt
+    for mount_dir in /media /run/media /mnt; do
+        if [ -d "$mount_dir" ]; then
+            # Look for mounted devices (excluding system mounts)
+            for device in "$mount_dir"/*; do
+                if [ -d "$device" ] && [ -r "$device" ]; then
+                    # Check if it looks like an SD card (has DCIM folder or common photo extensions)
+                    if [ -d "$device/DCIM" ] || find "$device" -maxdepth 2 -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.raw" -o -iname "*.cr2" -o -iname "*.nef" -o -iname "*.arw" \) 2>/dev/null | head -1 | grep -q .; then
+                        echo "$device"
+                        return 0
+                    fi
+                fi
+            done
+        fi
+    done
+    return 1
+}
+
+# Function to ask user for file type preference
+ask_file_type() {
+    echo -e "${CYAN}What would you like to import?${NC}"
+    echo "1) JPEGs only"
+    echo "2) RAW files only"
+    echo "3) Both JPEGs and RAW files"
+    echo -n "Enter choice [1-3]: "
+    read -r choice
+    
+    case "$choice" in
+        1)
+            FILE_TYPES="JPEGs"
+            ;;
+        2)
+            FILE_TYPES="RAW files"
+            ;;
+        3)
+            FILE_TYPES="JPEGs and RAW files"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Defaulting to both.${NC}"
+            FILE_TYPES="JPEGs and RAW files"
+            ;;
+    esac
+}
+
+# Function to ask for import directory
+ask_import_directory() {
+    echo -e "${CYAN}Enter import directory:${NC}"
+    echo -n "[$DEFAULT_IMPORT_DIR]: "
+    read -r import_dir
+    
+    if [ -z "$import_dir" ]; then
+        import_dir="$DEFAULT_IMPORT_DIR"
+    fi
+    
+    # Expand ~ and create directory if it doesn't exist
+    import_dir="${import_dir/#\~/$HOME}"
+    mkdir -p "$import_dir"
+    echo "$import_dir"
+}
+
+# Function to get EXIF date from file
+get_exif_date() {
+    local file="$1"
+    
+    # Try DateTimeOriginal first (most accurate)
+    local date=$(exiftool -s3 -DateTimeOriginal -d "%Y %m" "$file" 2>/dev/null | head -1)
+    if [ -n "$date" ] && [ "$date" != "-" ] && [ "${date:0:4}" != "----" ]; then
+        echo "$date"
+        return 0
+    fi
+    
+    # Fallback to FileModifyDate
+    date=$(exiftool -s3 -FileModifyDate -d "%Y %m" "$file" 2>/dev/null | head -1)
+    if [ -n "$date" ] && [ "$date" != "-" ] && [ "${date:0:4}" != "----" ]; then
+        echo "$date"
+        return 0
+    fi
+    
+    # Fallback to file modification date
+    if [ -f "$file" ]; then
+        local file_date=$(stat -c "%y" "$file" 2>/dev/null || stat -f "%Sm" -t "%Y %m" "$file" 2>/dev/null)
+        if [ -n "$file_date" ]; then
+            # Parse date format: "2025-11-18 22:46:05.146531958 +0200" -> "2025 11"
+            echo "$file_date" | awk '{split($1, d, "-"); print d[1], d[2]}'
+            return 0
+        fi
+    fi
+    
+    # Last resort: use current date
+    date +"%Y %m"
+}
+
+# Function to find and copy files
+import_files() {
+    local source_dir="$1"
+    local dest_base="$2"
+    
+    echo -e "${GREEN}Scanning for $FILE_TYPES...${NC}"
+    
+    # Find all matching files
+    local files_found=0
+    local files_copied=0
+    local files_skipped=0
+    
+    # Build find conditions directly (more efficient than eval)
+    local find_args=()
+    case "$FILE_TYPES" in
+        "JPEGs")
+            find_args=(-iname "*.jpg" -o -iname "*.jpeg")
+            ;;
+        "RAW files")
+            find_args=(-iname "*.raw" -o -iname "*.cr2" -o -iname "*.nef" -o -iname "*.arw" -o -iname "*.dng" -o -iname "*.raf" -o -iname "*.orf")
+            ;;
+        "JPEGs and RAW files")
+            find_args=(-iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.raw" -o -iname "*.cr2" -o -iname "*.nef" -o -iname "*.arw" -o -iname "*.dng" -o -iname "*.raf" -o -iname "*.orf")
+            ;;
+    esac
+    
+    # Use find directly instead of eval (safer and more efficient)
+    local found_any=false
+    while IFS= read -r -d '' file; do
+        found_any=true
+        files_found=$((files_found + 1))
+        
+        # Get EXIF date
+        local date_info=$(get_exif_date "$file")
+        local year=$(echo "$date_info" | awk '{print $1}')
+        local month=$(echo "$date_info" | awk '{print $2}')
+        
+        # Validate year and month
+        if [ -z "$year" ] || [ -z "$month" ] || ! [[ "$year" =~ ^[0-9]{4}$ ]] || ! [[ "$month" =~ ^[0-9]{1,2}$ ]]; then
+            echo -e "${YELLOW}Warning: Could not determine date for $file, using current date${NC}"
+            year=$(date +"%Y")
+            month=$(date +"%m")
+        fi
+        
+        # Format month with leading zero if needed
+        month=$(printf "%02d" "$month")
+        
+        # Create directory structure: YEAR/YEAR-MONTH
+        local dest_dir="$dest_base/$year/$year-$month"
+        mkdir -p "$dest_dir"
+        
+        # Get filename
+        local filename=$(basename "$file")
+        local dest_file="$dest_dir/$filename"
+        
+        # Check if file already exists
+        if [ -f "$dest_file" ]; then
+            # Compare file sizes (optimized - single stat call per file)
+            local src_size=$(stat -c "%s" "$file" 2>/dev/null || stat -f "%z" "$file" 2>/dev/null || echo "0")
+            local dest_size=$(stat -c "%s" "$dest_file" 2>/dev/null || stat -f "%z" "$dest_file" 2>/dev/null || echo "0")
+            
+            if [ "$src_size" = "$dest_size" ] && [ "$src_size" != "0" ]; then
+                echo -e "${YELLOW}Skipping $filename (already exists)${NC}"
+                files_skipped=$((files_skipped + 1))
+                continue
+            fi
+        fi
+        
+        # Copy file
+        echo -e "${CYAN}Copying $filename to $dest_dir/${NC}"
+        if cp "$file" "$dest_file" 2>/dev/null; then
+            files_copied=$((files_copied + 1))
+        else
+            echo -e "${RED}Error copying $filename${NC}"
+        fi
+        
+    done < <(find "$source_dir" -type f \( "${find_args[@]}" \) -print0 2>/dev/null)
+    
+    if [ "$found_any" = false ]; then
+        echo -e "${YELLOW}No matching files found.${NC}"
+    fi
+    
+    echo -e "${GREEN}Import complete!${NC}"
+    echo "  Files found: $files_found"
+    echo "  Files copied: $files_copied"
+    echo "  Files skipped: $files_skipped"
+}
+
+# Function to unmount SD card
+unmount_card() {
+    local mount_point="$1"
+    
+    echo -e "${CYAN}Unmounting SD card...${NC}"
+    
+    # Try to find the device
+    local device=$(findmnt -n -o SOURCE "$mount_point" 2>/dev/null || mount | grep "$mount_point" | awk '{print $1}')
+    
+    if [ -n "$device" ]; then
+        # Try unmount
+        if umount "$mount_point" 2>/dev/null; then
+            echo -e "${GREEN}SD card unmounted successfully${NC}"
+        else
+            echo -e "${YELLOW}Warning: Could not unmount $mount_point${NC}"
+            echo "You may need to unmount it manually"
+        fi
+    else
+        echo -e "${YELLOW}Could not determine device for $mount_point${NC}"
+    fi
+}
+
+# Main execution
+main() {
+    echo -e "${GREEN}=== SD Card Photo Import ===${NC}"
+    echo ""
+    
+    # Find SD card
+    echo -e "${CYAN}Looking for SD card...${NC}"
+    SD_CARD=$(find_sd_card)
+    
+    if [ -z "$SD_CARD" ]; then
+        echo -e "${RED}Error: No SD card detected!${NC}"
+        echo "Please insert an SD card and try again."
+        exit 1
+    fi
+    
+    echo -e "${GREEN}SD card found at: $SD_CARD${NC}"
+    echo ""
+    
+    # Ask user preferences
+    ask_file_type
+    echo ""
+    
+    IMPORT_DIR=$(ask_import_directory)
+    echo -e "${GREEN}Import directory: $IMPORT_DIR${NC}"
+    echo ""
+    
+    # Confirm before proceeding
+    echo -e "${YELLOW}Ready to import $FILE_TYPES from $SD_CARD to $IMPORT_DIR${NC}"
+    echo -n "Proceed? [y/N]: "
+    read -r confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Import cancelled."
+        exit 0
+    fi
+    
+    echo ""
+    
+    # Import files
+    import_files "$SD_CARD" "$IMPORT_DIR"
+    
+    echo ""
+    
+    # Unmount card
+    unmount_card "$SD_CARD"
+    
+    echo ""
+    echo -e "${GREEN}Done!${NC}"
+}
+
+# Run main function
+main "$@"

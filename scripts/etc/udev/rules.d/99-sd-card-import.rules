@@ -1,0 +1,6 @@
+# Udev rule to detect SD card insertion and trigger import script
+# This rule triggers when a block device is added (SD card inserted)
+# Note: This requires a wrapper script that waits for mount
+
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", RUN+="/usr/bin/systemd-run --user /home/pekka/.local/bin/sd-card-import-auto.sh"
+

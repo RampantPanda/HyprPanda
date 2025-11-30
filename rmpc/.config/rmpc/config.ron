@@ -3,8 +3,9 @@
 #![enable(unwrap_variant_newtypes)]
 (
     address: "127.0.0.1:6600",
+    music_directory: "/home/pekka/Oxbacka/Music",
     password: None,
-    theme: Some("cyberpunk"),
+    theme: Some("GETSOME"),
     cache_dir: None,
     on_song_change: None,
     volume_step: 5,

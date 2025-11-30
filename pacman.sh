@@ -17,7 +17,7 @@ sudo pacman -Syu --needed \
     thunar geany firedragon thunderbird github-desktop gparted inkscape \
     blender meld joplin-desktop snapper-tools galculator \
     libnotify jq mpv mediainfo fastfetch chafa python-numpy python-pyaudio \
-    rmpc mpd fzf bat bat-extras
+    rmpc mpd fzf bat bat-extras perl-image-exiftool
 
 # AUR packages (if yay is available)
 if command -v yay &> /dev/null; then
